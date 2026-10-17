@@ -8,7 +8,6 @@ from time import perf_counter
 from typing import Callable
 
 from .config import (
-    AlgorithmConfig,
     AppConfig,
     ElitismMode,
     ObjectiveMode,
@@ -58,17 +57,18 @@ class RunResult:
 
 class GeneticAlgorithm:
     def __init__(self, config: AppConfig) -> None:
+        config.validate()
         self.config = config
         self.encoding = BinaryEncoding.build(config.range)
         self.random = random.Random(config.algorithm.seed)
-        self.benchmark = BENCHMARK_FUNCTIONS[config.algorithm.benchmark_function]
+        self.benchmark = BENCHMARK_FUNCTIONS[config.algorithm.benchmark_function].create(config.range.dimensions)
 
     def _random_chromosome(self) -> str:
         return "".join(self.random.choice("01") for _ in range(self.encoding.chromosome_length))
 
     def _evaluate(self, chromosome: str) -> IndividualView:
         values = self.encoding.decode(chromosome)
-        objective = self.benchmark.evaluator(values)
+        objective = self.benchmark.evaluate(values)
         fitness = objective if self.config.algorithm.objective_mode == ObjectiveMode.MAXIMIZE else -objective
         return IndividualView(chromosome=chromosome, values=values, objective=objective, fitness=fitness)
 
@@ -79,21 +79,21 @@ class GeneticAlgorithm:
         algorithm = self.config.algorithm
         if algorithm.elite_mode == ElitismMode.COUNT:
             return max(0, min(algorithm.population_size, int(algorithm.elite_value)))
-        return max(1, round(algorithm.population_size * algorithm.elite_value / 100.0))
+        return round(algorithm.population_size * algorithm.elite_value / 100.0)
 
     def _maybe_apply_crossover(self, first: str, second: str) -> tuple[str, str]:
         algorithm = self.config.algorithm
-        if self.random.random() <= algorithm.cross_probability:
+        if self.random.random() < algorithm.cross_probability:
             return crossover(first, second, algorithm.crossover_method, self.random)
         return first, second
 
     def _maybe_mutate(self, chromosome: str) -> str:
         algorithm = self.config.algorithm
-        if self.random.random() <= algorithm.mutation_probability:
+        if self.random.random() < algorithm.mutation_probability:
             chromosome = mutate(chromosome, algorithm.mutation_method, self.encoding, self.random)
-        if self.random.random() <= algorithm.inversion_probability and len(chromosome) > 1:
+        if self.random.random() < algorithm.inversion_probability and len(chromosome) > 1:
             left = self.random.randrange(0, len(chromosome) - 1)
-            right = self.random.randrange(left + 1, len(chromosome))
+            right = self.random.randrange(left + 2, len(chromosome) + 1)
             chromosome = chromosome[:left] + chromosome[left:right][::-1] + chromosome[right:]
         return chromosome
 
@@ -111,6 +111,7 @@ class GeneticAlgorithm:
         self,
         progress_callback: Callable[[GenerationMetrics, IndividualView], None] | None = None,
         stop_flag: Callable[[], bool] | None = None,
+        record_population: bool = False,
     ) -> RunResult:
         started = perf_counter()
         population = self._initial_population()
@@ -118,7 +119,8 @@ class GeneticAlgorithm:
         population_history: list[ChromosomeRecord] = []
         best_individual = order_individuals(population, self.config.algorithm.objective_mode)[0]
 
-        for generation in range(self.config.algorithm.epochs):
+        # Generation zero is the initial population; epochs counts reproductions.
+        for generation in range(self.config.algorithm.epochs + 1):
             if stop_flag and stop_flag():
                 break
 
@@ -132,13 +134,16 @@ class GeneticAlgorithm:
                     objective=item.objective,
                     fitness=item.fitness,
                 )
-                for item in population
+                for item in (population if record_population else [])
             )
             current_best = order_individuals(population, self.config.algorithm.objective_mode)[0]
             if is_better(current_best.objective, best_individual.objective, self.config.algorithm.objective_mode):
                 best_individual = current_best
             if progress_callback:
                 progress_callback(metrics, best_individual)
+
+            if generation == self.config.algorithm.epochs:
+                break
 
             elites = order_individuals(population, self.config.algorithm.objective_mode)[: self._elite_count()]
             selected_count = max(2, round(self.config.algorithm.population_size * self.config.algorithm.selection_best_percent / 100.0))
@@ -163,7 +168,6 @@ class GeneticAlgorithm:
             population = [self._evaluate(chromosome) for chromosome in next_population]
 
         duration = perf_counter() - started
-        best_individual = order_individuals(population, self.config.algorithm.objective_mode)[0]
         return RunResult(
             best_individual=best_individual,
             metrics=history,
