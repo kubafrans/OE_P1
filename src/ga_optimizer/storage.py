@@ -3,7 +3,9 @@ from __future__ import annotations
 import csv
 import json
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 from .config import ObjectiveMode
 from .engine import GenerationMetrics, RunMetadata
@@ -15,8 +17,14 @@ class ResultsRepository:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.database_path)
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        connection = sqlite3.connect(self.database_path)
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _initialize(self) -> None:
         with self._connect() as connection:
@@ -92,15 +100,16 @@ class ResultsRepository:
     ) -> None:
         export_path.parent.mkdir(parents=True, exist_ok=True)
         with export_path.open("w", newline="", encoding="utf-8") as csv_file:
-            fieldnames = ["iteration", "best", "fitness", "std"]
+            fieldnames = ["iteration", "best", "mean", "fitness", "std"]
             writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
             writer.writeheader()
             for record in records:
                 fitness = record.best_objective if objective_mode == ObjectiveMode.MAXIMIZE else -record.best_objective
                 writer.writerow(
                     {
-                        "iteration": record.generation + 1,
+                        "iteration": record.generation,
                         "best": record.best_objective,
+                        "mean": record.average_objective,
                         "fitness": fitness,
                         "std": record.std_objective,
                     }

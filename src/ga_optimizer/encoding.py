@@ -14,9 +14,9 @@ class BinaryEncoding:
 
     @classmethod
     def build(cls, range_config: RangeConfig) -> "BinaryEncoding":
-        steps = max(1, round((range_config.upper - range_config.lower) / range_config.precision))
+        steps = max(1, ceil((range_config.upper - range_config.lower) / range_config.precision))
         bits_per_gene = max(1, ceil(log2(steps + 1)))
-        return cls(range_config=range_config, bits_per_gene=bits_per_gene, max_step=steps)
+        return cls(range_config=range_config, bits_per_gene=bits_per_gene, max_step=2**bits_per_gene - 1)
 
     @property
     def chromosome_length(self) -> int:
@@ -24,14 +24,14 @@ class BinaryEncoding:
 
     def encode_value(self, value: float) -> str:
         clipped = min(max(value, self.range_config.lower), self.range_config.upper)
-        step = round((clipped - self.range_config.lower) / self.range_config.precision)
+        step = round((clipped - self.range_config.lower) / (self.range_config.upper - self.range_config.lower) * self.max_step)
         step = min(max(step, 0), self.max_step)
         return format(step, f"0{self.bits_per_gene}b")
 
     def decode_value(self, bits: str) -> float:
         step = int(bits, 2)
         step = min(step, self.max_step)
-        value = self.range_config.lower + step * self.range_config.precision
+        value = self.range_config.lower + step / self.max_step * (self.range_config.upper - self.range_config.lower)
         return min(value, self.range_config.upper)
 
     def encode(self, values: list[float]) -> str:

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import threading
+import queue
 import tkinter as tk
-from dataclasses import dataclass
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -21,39 +21,47 @@ from .config import (
     SelectionMethod,
 )
 from .engine import GeneticAlgorithm, GenerationMetrics
+from .experiments import ExperimentRunner, export_run
+from .functions import BENCHMARK_FUNCTIONS
 from .storage import ResultsRepository
 
 
-@dataclass(slots=True)
-class FieldSpec:
-    label: str
-    default: str
-
-
 class GeneticApp(tk.Tk):
-    def __init__(self) -> None:
+    def __init__(self, database_path: Path | None = None, exports_root: Path | None = None) -> None:
         super().__init__()
         self.title("Genetic Algorithm Optimizer")
-        self.geometry("1280x840")
-        self.minsize(1120, 760)
+        self.geometry("1400x900")
+        self.minsize(1120, 700)
 
         self._running = False
-        self._output_path = Path("data") / "results.sqlite3"
-        self._exports_root = Path("data") / "exports"
+        self._output_path = database_path or Path("data") / "results.sqlite3"
+        self._exports_root = exports_root or Path("data") / "exports"
         self.repository = ResultsRepository(self._output_path)
         self._current_config: AppConfig | None = None
+        self._events: queue.Queue = queue.Queue()
 
         self.range_entries: dict[str, tk.Entry] = {}
         self.algorithm_entries: dict[str, tk.Entry] = {}
         self.option_vars: dict[str, tk.StringVar] = {}
         self._create_layout()
+        self.after(100, self._poll_events)
 
     def _create_layout(self) -> None:
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
 
-        left = ttk.Frame(self, padding=14)
-        left.grid(row=0, column=0, sticky="nsw")
+        controls = ttk.Frame(self)
+        controls.grid(row=0, column=0, sticky="nsw")
+        controls.rowconfigure(0, weight=1)
+        canvas = tk.Canvas(controls, width=390, highlightthickness=0)
+        canvas.grid(row=0, column=0, sticky="ns")
+        scrollbar = ttk.Scrollbar(controls, orient="vertical", command=canvas.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        left = ttk.Frame(canvas, padding=14)
+        window = canvas.create_window((0, 0), window=left, anchor="nw")
+        left.bind("<Configure>", lambda event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
         right = ttk.Frame(self, padding=(0, 14, 14, 14))
         right.grid(row=0, column=1, sticky="nsew")
         right.rowconfigure(1, weight=1)
@@ -69,8 +77,8 @@ class GeneticApp(tk.Tk):
         range_frame = ttk.LabelFrame(parent, text="Zakres i reprezentacja", padding=10)
         range_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=6)
 
-        self._add_entry(range_frame, 0, "begin of range", "-5.12", self.range_entries)
-        self._add_entry(range_frame, 1, "end of range", "5.12", self.range_entries)
+        self._add_entry(range_frame, 0, "begin of range", "-500", self.range_entries)
+        self._add_entry(range_frame, 1, "end of range", "500", self.range_entries)
         self._add_entry(range_frame, 2, "precision", "0.01", self.range_entries)
         self._add_entry(range_frame, 3, "number of parameters", "5", self.range_entries)
 
@@ -92,16 +100,32 @@ class GeneticApp(tk.Tk):
         self._add_option(algorithm_frame, 11, "cross method", [item.value for item in CrossoverMethod], CrossoverMethod.TWO_POINT.value)
         self._add_option(algorithm_frame, 12, "mutation method", [item.value for item in MutationMethod], MutationMethod.ONE_POINT.value)
         self._add_option(algorithm_frame, 13, "function", [item.value for item in BenchmarkFunctionName], BenchmarkFunctionName.SCHWEFEL.value)
+        self.option_vars["function"].trace_add("write", self._function_changed)
+        self._add_entry(algorithm_frame, 14, "repetitions", "1", self.algorithm_entries)
+        self._add_entry(algorithm_frame, 15, "base seed", "42", self.algorithm_entries)
+        self.benchmark_hint = ttk.Label(parent, text="Schwefel: zakres [-500, 500].", wraplength=330)
+        self.benchmark_hint.grid(row=3, column=0, columnspan=2, sticky="w")
 
         button_frame = ttk.Frame(parent)
-        button_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(12, 8))
+        button_frame.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(12, 8))
         button_frame.columnconfigure(0, weight=1)
 
         self.run_button = ttk.Button(button_frame, text="Uruchom", command=self._start_run)
         self.run_button.grid(row=0, column=0, sticky="ew")
 
         self.status_label = ttk.Label(parent, text="Gotowe do uruchomienia.")
-        self.status_label.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.status_label.grid(row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+    def _function_changed(self, *_args) -> None:
+        definition = BENCHMARK_FUNCTIONS[BenchmarkFunctionName(self.option_vars["function"].get())]
+        for key, value in zip(("begin of range", "end of range"), definition.bounds):
+            self.range_entries[key].delete(0, "end")
+            self.range_entries[key].insert(0, str(value))
+        if definition.supported_dimensions:
+            self.range_entries["number of parameters"].delete(0, "end")
+            self.range_entries["number of parameters"].insert(0, "10")
+        dimensions = "10, 20, 30, 50, 100" if definition.supported_dimensions else "dowolna dodatnia liczba"
+        self.benchmark_hint.configure(text=f"Zakres: {definition.bounds}; wymiary: {dimensions}.")
 
     def _add_entry(self, parent: ttk.Frame, row: int, label: str, default: str, store: dict[str, tk.Entry]) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=2)
@@ -130,7 +154,11 @@ class GeneticApp(tk.Tk):
         self.variables_var = tk.StringVar(value="Najlepsze zmienne: -")
         ttk.Label(top, textvariable=self.duration_var, font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
         ttk.Label(top, textvariable=self.best_var, font=("Segoe UI", 10, "bold")).grid(row=0, column=1, sticky="w")
-        ttk.Label(top, textvariable=self.variables_var, font=("Segoe UI", 10, "bold")).grid(row=0, column=2, sticky="w")
+        ttk.Label(top, textvariable=self.variables_var, wraplength=750).grid(row=1, column=0, columnspan=3, sticky="w")
+        self.summary_var = tk.StringVar(value="Powtórzenia: 1 (do sprawozdania ustaw co najmniej 10).")
+        ttk.Label(top, textvariable=self.summary_var, wraplength=750).grid(row=2, column=0, columnspan=3, sticky="w")
+        self.reference_var = tk.StringVar(value="")
+        ttk.Label(top, textvariable=self.reference_var, wraplength=750).grid(row=3, column=0, columnspan=3, sticky="w")
 
         content = ttk.Notebook(parent)
         content.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
@@ -170,7 +198,7 @@ class GeneticApp(tk.Tk):
         return float(entries[key].get().strip())
 
     def _read_int(self, entries: dict[str, tk.Entry], key: str) -> int:
-        return int(float(entries[key].get().strip()))
+        return int(entries[key].get().strip())
 
     def _build_config(self) -> AppConfig:
         range_config = RangeConfig(
@@ -194,6 +222,7 @@ class GeneticApp(tk.Tk):
             mutation_method=MutationMethod(self.option_vars["mutation method"].get()),
             objective_mode=ObjectiveMode(self.option_vars["objective mode"].get()),
             benchmark_function=BenchmarkFunctionName(self.option_vars["function"].get()),
+            seed=self._read_int(self.algorithm_entries, "base seed"),
         )
         return AppConfig(range=range_config, algorithm=algorithm)
 
@@ -202,15 +231,12 @@ class GeneticApp(tk.Tk):
             return
         try:
             config = self._build_config()
+            config.validate()
+            repetitions = self._read_int(self.algorithm_entries, "repetitions")
+            if repetitions < 1:
+                raise ValueError("Repetitions must be a positive integer.")
         except ValueError as error:
             messagebox.showerror("Błąd konfiguracji", str(error))
-            return
-
-        if config.range.upper <= config.range.lower:
-            messagebox.showerror("Błąd konfiguracji", "End of range must be greater than begin of range.")
-            return
-        if config.range.precision <= 0:
-            messagebox.showerror("Błąd konfiguracji", "Precision must be greater than zero.")
             return
 
         self._current_config = config
@@ -220,21 +246,63 @@ class GeneticApp(tk.Tk):
         self._append_log("Start obliczeń")
 
         def worker() -> None:
-            engine = GeneticAlgorithm(config)
-
-            def progress(metrics: GenerationMetrics, best) -> None:
-                self.after(0, lambda: self._update_progress(metrics, best))
-
-            result = engine.run(progress_callback=progress)
-            run_id = self.repository.save_run(engine.metadata_for_run(result), result.metrics)
-            self.after(0, lambda: self._finish_run(result, run_id))
+            try:
+                if repetitions > 1:
+                    runner = ExperimentRunner(self.repository, self._exports_root)
+                    experiment = runner.run(config, repetitions, config.algorithm.seed,
+                                            lambda done, total: self._events.put(("batch_progress", done, total)))
+                    self._events.put(("experiment", experiment))
+                else:
+                    engine = GeneticAlgorithm(config)
+                    result = engine.run(progress_callback=lambda metrics, best: self._events.put(("progress", metrics, best)))
+                    metadata = engine.metadata_for_run(result)
+                    run_id = self.repository.save_run(metadata, result.metrics)
+                    export_run(self._exports_root / f"run_{run_id}", result, metadata, self.repository)
+                    self._events.put(("finished", result, run_id))
+            except Exception as error:
+                self._events.put(("error", str(error)))
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _poll_events(self) -> None:
+        try:
+            for _ in range(200):
+                event, *args = self._events.get_nowait()
+                if event == "progress":
+                    self._update_progress(*args)
+                elif event == "batch_progress":
+                    self.status_label.configure(text=f"Powtórzenie {args[0]} / {args[1]}")
+                elif event == "finished":
+                    self.summary_var.set("Pojedyncze uruchomienie; do porównań użyj >= 10 powtórzeń.")
+                    self._finish_run(*args)
+                elif event == "experiment":
+                    experiment = args[0]
+                    summary = experiment.summary
+                    self._finish_run(experiment.best_run, experiment.best_run_id)
+                    self.summary_var.set(
+                        f"{summary['repetitions']} powtórzeń: średnia={summary['mean']:.6f}; "
+                        f"najlepszy={summary['best']:.6f}; najgorszy={summary['worst']:.6f}; "
+                        f"średni czas={summary['mean_duration_seconds']:.3f}s")
+                    self._append_log(f"Podsumowanie: {experiment.export_directory}")
+                elif event == "error":
+                    self._show_error(args[0])
+        except queue.Empty:
+            pass
+        except Exception as error:
+            self._show_error(str(error))
+        self.after(100, self._poll_events)
+
+    def _show_error(self, message: str) -> None:
+        self._running = False
+        self.run_button.configure(state="normal")
+        self.status_label.configure(text="Błąd obliczeń lub zapisu; można uruchomić ponownie.")
+        self._append_log(message)
+        messagebox.showerror("Błąd", message)
+
     def _update_progress(self, metrics: GenerationMetrics, best) -> None:
-        self.status_label.configure(text=f"Epoka {metrics.generation + 1}: najlepszy wynik {best.objective:.6f}")
+        self.status_label.configure(text=f"Generacja {metrics.generation}: najlepszy wynik {best.objective:.6f}")
         self._append_log(
-            f"Epoka {metrics.generation + 1}: best={metrics.best_objective:.6f}, avg={metrics.average_objective:.6f}, std={metrics.std_objective:.6f}"
+            f"Generacja {metrics.generation}: best={metrics.best_objective:.6f}, avg={metrics.average_objective:.6f}, std={metrics.std_objective:.6f}"
         )
 
     def _finish_run(self, result, run_id: int) -> None:
@@ -245,13 +313,20 @@ class GeneticApp(tk.Tk):
         self.variables_var.set(
             "Najlepsze zmienne: " + ", ".join(f"{value:.4f}" for value in result.best_individual.values)
         )
+        if self._current_config:
+            definition = BENCHMARK_FUNCTIONS[self._current_config.algorithm.benchmark_function]
+            minimum, _ = definition.create(self._current_config.range.dimensions).minimum()
+            reference = f"Znane minimum funkcji: {minimum:.8g}"
+            if self._current_config.algorithm.objective_mode == ObjectiveMode.MINIMIZE:
+                reference += f"; błąd bezwzględny: {abs(result.best_individual.objective - minimum):.8g}"
+            self.reference_var.set(reference)
         self.status_label.configure(text="Obliczenia zakończone.")
         self._draw_plots(result.metrics)
         self._export_artifacts(run_id, result)
         self._append_log(f"Zapisano wynik do bazy: {self._output_path}")
 
     def _draw_plots(self, metrics: list[GenerationMetrics]) -> None:
-        generations = [record.generation + 1 for record in metrics]
+        generations = [record.generation for record in metrics]
         best_values = [record.best_objective for record in metrics]
         average_values = [record.average_objective for record in metrics]
         std_values = [record.std_objective for record in metrics]

@@ -7,11 +7,12 @@ name = "ga-optimizer"
 version = "0.1.0"
 description = "GUI application for binary genetic algorithm optimization"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11,<3.12"
 dependencies = [
   "matplotlib>=3.8",
   "benchmark_functions",
   "scipy",
+  "opfunu==1.0.4",
 ]
 
 [tool.setuptools]
